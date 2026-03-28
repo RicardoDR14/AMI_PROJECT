@@ -1,0 +1,43 @@
+# Onde Passo o Meu Tempo? — dependências Python 3.10+
+#
+# NOTA: osmnx deve aparecer ANTES de trackintel.
+# O trackintel não pina a versão do osmnx; sem este pin o pip instalaria
+# osmnx 2.x que exige Python 3.11+.
+#
+# scikit-mobility foi excluído: fixa pandas<2.0 e geopandas<0.11,
+# incompatível com o restante stack.
+# Substitutos: trackintel.analysis.metrics (radius_gyration, location_entropy).
+
+# ── Geoespacial (ordem importa para o resolver do pip) ────────────────────────
+osmnx==1.9.4
+geopandas==0.14.4    # 1.x incompatível com osmnx 1.9.4 (requer geopandas<0.15)
+shapely==2.0.6
+pyproj==3.6.1
+fiona==1.10.1
+
+# ── Dados ─────────────────────────────────────────────────────────────────────
+pandas==2.2.3
+numpy==1.26.4
+
+# ── Pipeline de mobilidade ────────────────────────────────────────────────────
+trackintel==1.4.2
+movingpandas==0.19.0
+
+# ── Machine Learning ──────────────────────────────────────────────────────────
+scikit-learn==1.5.2
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+streamlit==1.40.2
+streamlit-folium==0.21.0
+folium==0.18.0
+seaborn==0.13.2
+matplotlib==3.9.2
+hvplot==0.10.0
+bokeh==3.5.2
+
+# ── Privacidade / API ─────────────────────────────────────────────────────────
+requests==2.32.3
+python-dotenv==1.0.1
+
+# ── Utilitários ───────────────────────────────────────────────────────────────
+tqdm==4.66.5

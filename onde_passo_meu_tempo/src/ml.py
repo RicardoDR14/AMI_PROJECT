@@ -205,6 +205,83 @@ def train_and_evaluate(
     return results
 
 
+def train_evaluate_single_user(
+    features: pd.DataFrame,
+    labels: pd.Series,
+    user_ids: pd.Series,
+    selected_user: int,
+    test_size: float = 0.2,
+) -> dict:
+    """Treina e avalia três modelos com split 80/20 para um utilizador específico.
+
+    Filtra os dados do utilizador seleccionado e divide em 80% treino / 20% teste
+    com estratificação por classe (preserva proporção de classes em ambos os conjuntos).
+
+    Parâmetros
+    ----------
+    features : pd.DataFrame
+        DataFrame de features devolvido por extract_features().
+    labels : pd.Series
+        Série de rótulos de actividade.
+    user_ids : pd.Series
+        Série com o identificador do utilizador por amostra.
+    selected_user : int
+        ID do utilizador a analisar (1, 2 ou 3).
+    test_size : float
+        Fracção dos dados usada para teste (padrão=0.2 → 20%).
+
+    Retorna
+    -------
+    dict
+        - 'user': int
+        - 'n_train': int
+        - 'n_test': int
+        - 'models': dict com accuracy, f1_macro e report por modelo
+    """
+    from sklearn.model_selection import train_test_split
+
+    mask = user_ids == selected_user
+    X = features[mask].values
+    y = labels[mask].values
+
+    # Estratificação: garantir que todas as classes estão em treino e teste
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=RANDOM_STATE, stratify=y
+        )
+    except ValueError:
+        # Fallback sem estratificação (classes com < 2 amostras)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=RANDOM_STATE
+        )
+
+    models: dict = {
+        "GaussianNB": GaussianNB(),
+        "DecisionTree": DecisionTreeClassifier(random_state=RANDOM_STATE),
+        "RandomForest": RandomForestClassifier(
+            n_estimators=RF_N_ESTIMATORS, random_state=RANDOM_STATE
+        ),
+    }
+
+    result: dict = {
+        "user": selected_user,
+        "n_train": len(y_train),
+        "n_test": len(y_test),
+        "models": {},
+    }
+
+    for model_name, model in models.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        result["models"][model_name] = {
+            "accuracy": accuracy_score(y_test, y_pred),
+            "f1_macro": f1_score(y_test, y_pred, average="macro", zero_division=0),
+            "report":   classification_report(y_test, y_pred, zero_division=0),
+        }
+
+    return result
+
+
 def print_results(results: list[dict]) -> None:
     """Imprime as métricas de avaliação por fold e as médias globais.
 

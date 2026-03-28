@@ -231,7 +231,12 @@ with tab1:
     if st.button("▶ Gerar mapa animado"):
         with st.spinner("A gerar mapa MovingPandas…"):
             try:
-                html_str = tc.explore().to_html()
+                import io
+                mpd_map = tc.explore()
+                # folium.Map → HTML string
+                html_bytes = io.BytesIO()
+                mpd_map.save(html_bytes, close_file=False)
+                html_str = html_bytes.getvalue().decode("utf-8")
                 st.components.v1.html(html_str, height=500, scrolling=False)
             except Exception as e:
                 st.warning(f"MovingPandas explore() não disponível: {e}")

@@ -1,22 +1,19 @@
-# Onde Passo o Meu Tempo? — dependências Python 3.10+
+# Onde Passo o Meu Tempo? — dependências Python 3.12
 #
-# NOTA: osmnx deve aparecer ANTES de trackintel.
-# O trackintel não pina a versão do osmnx; sem este pin o pip instalaria
-# osmnx 2.x que exige Python 3.11+.
-#
-# scikit-mobility foi excluído: fixa pandas<2.0 e geopandas<0.11,
-# incompatível com o restante stack.
-# Substitutos: trackintel.analysis.metrics (radius_gyration, location_entropy).
+# NOTAS DE COMPATIBILIDADE:
+#   - geopandas >= 1.0 obrigatório para trackintel 1.4.2
+#     (usa _geodataframe_constructor_with_fallback, removido em 0.14)
+#   - osmnx 2.x requer Python >= 3.11; sistema tem Python 3.12 → OK
+#   - scikit-mobility excluído: fixa pandas<2.0 e geopandas<0.11
+#   - mapclassify obrigatório para MovingPandas .explore()
 
 # ── Geoespacial ───────────────────────────────────────────────────────────────
-# Sistema tem Python 3.12 → osmnx 2.x suportado (requer Python ≥ 3.11).
-# trackintel 1.4.2 usa API interna do geopandas 1.x (_geodataframe_constructor_with_fallback)
-# → geopandas deve ser ≥ 1.0.
 geopandas==1.0.1
 osmnx==2.0.0
 shapely==2.0.6
 pyproj==3.6.1
 fiona==1.10.1
+mapclassify==2.8.1
 
 # ── Dados ─────────────────────────────────────────────────────────────────────
 pandas==2.2.3

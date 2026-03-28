@@ -1,7 +1,7 @@
 # Notas de Implementação — Onde Passo o Meu Tempo?
 
 Guia técnico de referência para o pipeline de mobilidade.
-Explica as decisões de implementação, o fluxo de dados e como correr o projecto.
+Explica as decisões de implementação, o fluxo de dados, os bugs resolvidos e como correr o projecto.
 
 ---
 
@@ -9,29 +9,27 @@ Explica as decisões de implementação, o fluxo de dados e como correr o projec
 
 | Biblioteca | Papel | Nota |
 |---|---|---|
-| **Trackintel** | GPS → staypoints → locations → trips | Construída especificamente para mobilidade; trata gaps, ruído e clustering num único pipeline |
-| **MovingPandas** | Visualização interactiva de trajectórias | Integração HoloViz; `tc.explore()` gera mapa animado sem configuração extra |
-| **scikit-learn** | Classificador de actividade | Standard; fácil de trocar modelos sem mudar o restante código |
-| **OSMnx** | Download de rede viária + snap-to-road | Acesso directo ao OpenStreetMap; integra com networkx |
-| ~~scikit-mobility~~ | ~~Métricas de mobilidade~~ | **Excluído**: fixa `pandas<2.0` e `geopandas<0.11`, incompatível com o stack actual. Substituído por `trackintel.analysis.metrics` para radius_gyration e location_entropy |
+| **Trackintel** | GPS → staypoints → locations → trips | Construída para mobilidade; trata gaps, ruído e clustering |
+| **MovingPandas** | Visualização interactiva de trajectórias | `.explore()` gera mapa animado; requer `mapclassify` |
+| **scikit-learn** | Classificador de actividade | Standard; fácil de trocar modelos |
+| **OSMnx** | Download de rede viária + snap-to-road | Acesso directo ao OpenStreetMap |
+| ~~scikit-mobility~~ | ~~Métricas de mobilidade~~ | **Excluído**: fixa `pandas<2.0` e `geopandas<0.11` |
 
 ---
 
-## 2. Nomes de colunas reais vs. CLAUDE.md
+## 2. Nomes de colunas reais vs. CLAUDE.md original
 
-O CLAUDE.md usa nomes genéricos. As colunas reais dos CSVs do ContextLabeler são:
-
-| CLAUDE.md | Coluna real no CSV | Notas |
+| Genérico | Coluna real no CSV | Notas |
 |---|---|---|
 | `latitude` | `location_lat` | Graus decimais WGS-84 |
 | `longitude` | `location_lon` | Graus decimais WGS-84 |
-| `timestamp` | `time` | Unix **milissegundos** → dividir por 1000 para segundos |
-| `activity_label` | `label` | Valores: Sleep, Home, Working, Break, Lunch Break, Free time, Restaurant, Nightlife, Physical exercise, Shopping |
-| `battery` | `battery_unplugged` | Binário: 1 = sem carregar (em mobilidade), 0 = a carregar |
-| `linear_accel` | `sensor_linear_acc_x/y/z_mean` | Três eixos separados → calcular norma Euclidiana |
+| `timestamp` | `time` | Unix **milissegundos** → dividir por 1000 |
+| `activity_label` | `label` | 10 classes |
+| `battery` | `battery_unplugged` | Binário: 1=sem carregar |
+| `linear_accel` | `sensor_linear_acc_x/y/z_mean` | Calcular norma Euclidiana |
 | `wifi_count` | `wifi_connected` | Binário |
 
-Os CSVs têm 1 333 colunas; `load_contextlabeler` usa `usecols=COLS_NEEDED` para carregar apenas 9, poupando ~98% de I/O.
+Os CSVs têm 1 333 colunas; `load_contextlabeler` usa `usecols=COLS_NEEDED` → 9 colunas, poupa ~98% de I/O.
 
 ---
 
@@ -39,19 +37,17 @@ Os CSVs têm 1 333 colunas; `load_contextlabeler` usa `usecols=COLS_NEEDED` para
 
 ```
 data/user_1.csv
-data/user_2.csv   ──► load_contextlabeler()  ──► raw_df (pd.DataFrame, 9 colunas)
+data/user_2.csv   ──► load_contextlabeler()  ──► raw_df (9 colunas)
 data/user_3.csv                                        │
                                                        ├──► extract_features()  [ml.py]
                                                        │         │
                                                        │         ▼
-                                                       │    train_and_evaluate()
-                                                       │         │
-                                                       │         ▼
-                                                       │    print_results()
+                                                       │    train_and_evaluate()       ← LOUO
+                                                       │    train_evaluate_single_user() ← 80/20
                                                        │
                                                        ▼
                                                build_positionfixes()
-                                               (remoção de outliers GPS)
+                                               (remoção outliers GPS > 200 km/h)
                                                        │
                                                        ▼
                                                build_trajectories()
@@ -59,12 +55,12 @@ data/user_3.csv                                        │
                                                        │
                                                        ▼
                                                segment_trajectories()
-                                               → spts + tpls
+                                               → spts (+ is_activity=True) + tpls
                                                        │
                                                        ▼
                                                merge_and_detect_locations()
-                                               → spts + locs
-                                               + Silhouette/DB impressos
+                                               → spts_merged + locs
+                                               (Silhouette + DB impressos)
                                                        │
                                                        ▼
                                                enrich_locations()
@@ -80,37 +76,33 @@ data/user_3.csv                                        │
                                                        │
                                                        ▼
                                                dashboard.py (Streamlit)
+                                               sidebar: User 1 / 2 / 3 / Todos
 ```
 
 ---
 
-## 4. Porquê `extract_features` recebe `raw_df` em vez de `staypoints`
+## 4. Porquê `extract_features` recebe `raw_df` e não `staypoints`
 
-A tarefa de ML é **classificação de actividade ao nível da amostra** — cada linha do CSV (janela de 60 s) já tem um rótulo (`label`). Os staypoints agregam múltiplas amostras numa só linha, o que eliminaria o detalhe de sensor (wifi, bateria, aceleração) necessário como features.
-
-O dicionário de `run_pipeline()` inclui `raw_df` para que `extract_features` possa aceder aos dados directamente:
+A tarefa de ML é **classificação ao nível da amostra** — cada linha do CSV (janela de 60 s) tem um rótulo. Os staypoints agregam múltiplas amostras, perdendo o detalhe de sensor necessário como features.
 
 ```python
-from src.pipeline import run_pipeline
-from src.ml import extract_features, train_and_evaluate, print_results
-
 artefactos = run_pipeline()
 features, labels, user_ids = extract_features(artefactos['raw_df'])
-results = train_and_evaluate(features, labels, user_ids)
-print_results(results)
 ```
 
 ---
 
-## 5. Porquê leave-one-user-out em vez de k-fold
+## 5. Estratégias de avaliação ML
 
-Com k-fold padrão, os dados dos 3 utilizadores seriam misturados em treino/teste. Isso mediria "conseguimos classificar actividades de um utilizador que já vimos?" — pouco útil para generalização.
+### Leave-One-User-Out (LOUO) — modo "Todos"
+Responde a: *"o modelo funciona para um utilizador novo?"*
+3 folds; cada fold treina em 2 utilizadores e testa no restante.
 
-**Leave-one-user-out** responde à pergunta certa: "o modelo funciona para um utilizador **novo**?"
+### 80/20 por utilizador — modo "User X"
+Responde a: *"quão bem classifica as actividades deste utilizador específico?"*
+Split estratificado dentro dos dados de um só utilizador.
 
 ### Limitação conhecida — desequilíbrio de classes
-
-Três classes aparecem em apenas 1–2 utilizadores:
 
 | Classe | Utilizadores |
 |---|---|
@@ -118,34 +110,120 @@ Três classes aparecem em apenas 1–2 utilizadores:
 | Physical exercise | Só user_2 |
 | Shopping | Só user_3 |
 
-Quando o utilizador com uma dessas classes é o conjunto de teste, o modelo treinado nos outros 2 nunca viu essa classe → F1 = 0 para essa classe. Isto é esperado e deve ser mencionado na tese como limitação do tamanho do dataset.
-
-O código usa `zero_division=0` no `classification_report` para evitar erros nesta situação.
+Em LOUO, F1=0 para essas classes quando o seu utilizador é o conjunto de teste. Usar `zero_division=0`.
 
 ---
 
-## 6. Porquê `osmnx` deve aparecer antes de `trackintel` em requirements.txt
+## 6. Bugs resolvidos durante implementação
 
-`trackintel` lista `osmnx` como dependência sem fixar a versão. Sem um pin explícito, o `pip` instala a última versão do osmnx (2.x), que exige Python 3.11+.
+### 6.1 `_geodataframe_constructor_with_fallback` — trackintel 1.4.2 + geopandas 1.x
 
-Ao colocar `osmnx==1.9.4` **antes** de `trackintel==1.4.2` no ficheiro, o resolver do pip respeita o pin antes de encontrar a dependência mais permissiva do trackintel.
+**Erro:** `AttributeError: type object 'GeoDataFrame' has no attribute '_geodataframe_constructor_with_fallback'`
+
+**Causa:** trackintel 1.4.2 chama este método interno do geopandas, removido em 0.14.0.
+
+**Fix:** Shim em `src/__init__.py` que restaura o método antes de qualquer import trackintel:
+```python
+if not hasattr(gpd.GeoDataFrame, "_geodataframe_constructor_with_fallback"):
+    @classmethod
+    def _geodataframe_constructor_with_fallback(cls, *args, **kwargs):
+        try:
+            return cls(*args, **kwargs)
+        except Exception:
+            return pd.DataFrame(*args, **kwargs)
+    gpd.GeoDataFrame._geodataframe_constructor_with_fallback = _geodataframe_constructor_with_fallback
+```
+
+### 6.2 `generate_trips` — módulo errado
+
+**Erro:** `AttributeError: module 'trackintel.preprocessing.trips' has no attribute 'generate_trips'`
+
+**Fix:** Usar `ti.preprocessing.generate_trips` (não `.trips.generate_trips`).
+
+### 6.3 `merge_staypoints` perde geometria
+
+**Erro:** `'Series' object has no attribute 'geometry'` no `generate_trips`.
+
+**Causa:** `merge_staypoints` com `agg={}` devolve apenas `user_id`, `started_at`, `finished_at` — descarta geometria.
+
+**Fix:**
+```python
+merge_staypoints(..., agg={"geometry": "first", "is_activity": "any"})
+# Depois reconverter:
+spts_merged = gpd.GeoDataFrame(spts_raw, geometry="geometry", crs=spts_locs.crs)
+```
+
+### 6.4 `is_activity` não existe após `generate_staypoints`
+
+**Erro:** `AttributeError: staypoints need the column 'is_activity'`
+
+**Fix:** Adicionar manualmente após `generate_staypoints`:
+```python
+spts["is_activity"] = True
+```
+
+### 6.5 osmnx 2.x — `graph_from_bbox` API changed
+
+**Erro:** Keyword args `north=`, `south=`, `east=`, `west=` não existem em osmnx 2.x.
+
+**Fix:**
+```python
+G = ox.graph_from_bbox(
+    bbox=(float(lons.min()), float(lats.min()), float(lons.max()), float(lats.max())),
+    network_type=OSM_NETWORK_TYPE,
+)
+```
+
+### 6.6 `cat_map` com índice duplicado no k-anonimato
+
+**Erro:** `InvalidIndexError: Reindexing only valid with uniquely valued Index objects`
+
+**Fix:**
+```python
+if not cat_map.index.is_unique:
+    cat_map = cat_map[~cat_map.index.duplicated(keep="first")]
+```
+
+### 6.7 `MovingPandas.explore()` devolve `folium.Map`, não tem `.to_html()`
+
+**Fix:**
+```python
+buf = io.BytesIO()
+tc.explore().save(buf, close_file=False)
+html_str = buf.getvalue().decode("utf-8")
+```
+
+### 6.8 Dashboard perde estado ao mudar utilizador (session_state)
+
+**Causa:** Streamlit faz rerun a cada interacção; conteúdo gerado por botões desaparece.
+
+**Fix:** Persistir o HTML do mapa MovingPandas em `st.session_state["mpd_html"]`.
 
 ---
 
-## 7. Cache da rede viária OSMnx
+## 7. Compatibilidade de versões — triângulo geopandas/osmnx/trackintel
 
-O passo de snap-to-road descarrega a rede viária para toda a bounding box GPS (região Pisa/Toscana, ~100 km × 55 km). Este download pode demorar vários minutos e requer ~500 MB de RAM.
+| Componente | Versão | Restrição |
+|---|---|---|
+| Python | 3.12 | osmnx 2.x requer ≥ 3.11 |
+| geopandas | 1.0.1 | trackintel 1.4.2 requer ≥ 1.0 (API interna) |
+| osmnx | 2.0.0 | requer Python ≥ 3.11 |
+| trackintel | 1.4.2 | requer geopandas ≥ 1.0 (com o shim de src/__init__.py) |
 
-O grafo é guardado em `data/road_graph.graphml` após o primeiro download. Chamadas subsequentes carregam do ficheiro em segundos.
+---
 
-Para forçar um novo download (p. ex. se a rede viária foi actualizada):
+## 8. Cache da rede viária OSMnx
+
+O snap-to-road descarrega a rede viária para toda a bounding box (~Pisa/Toscana, 100km × 55km). Demora vários minutos e requer ~500 MB RAM. O grafo é guardado em `data/road_graph.graphml`.
+
+Para forçar novo download:
 ```bash
 rm data/road_graph.graphml
 ```
 
 ---
 
-## 8. Modelo de dados Trackintel (simplificado)
+## 9. Modelo de dados Trackintel
 
 ```
 Positionfixes  ──►  Staypoints  ──►  Locations
@@ -156,47 +234,51 @@ Positionfixes  ──►  Staypoints  ──►  Locations
 
 | Artefacto | O que é | Neste dataset |
 |---|---|---|
-| **Positionfixes** | Pontos GPS brutos | 1 por 60 s |
-| **Staypoints** | Onde o utilizador ficou parado ≥ 5 min num raio de 100 m | Maioria dos pontos (~86% estacionários) |
-| **Locations** | Clusters de staypoints em locais repetidos (DBSCAN) | Casa, Trabalho, etc. |
-| **Triplegs** | Segmentos de movimento entre staypoints | Poucos, dado o alto ratio de estacionaridade |
-| **Trips** | Triplegs agrupados por origem/destino | Derivados dos triplegs |
+| **Positionfixes** | Pontos GPS brutos | 1 por 60 s; ~45 k total |
+| **Staypoints** | Parado ≥ 5 min num raio de 100 m | ~1 734 (~86% do tempo) |
+| **Locations** | Clusters DBSCAN de staypoints | 93 (partilhadas pelos 3 utilizadores) |
+| **Triplegs** | Segmentos de movimento entre staypoints | ~175 |
+| **Trips** | Triplegs agrupados por origem/destino | ~175 |
 
-**Nota importante sobre a geometria das Locations:** a coluna de geometria chama-se `center` (não `geometry`). Qualquer acesso deve usar `locs.set_geometry("center")` ou `locs["center"]`.
-
----
-
-## 9. Arquitectura de privacidade — 3 camadas independentes
-
-As camadas são aplicadas sequencialmente em `apply_privacy()` mas podem ser desactivadas individualmente:
-
-```
-Dados GPS originais
-       │
-       ▼
-1. Supressão domiciliar
-   Remove todos os pontos num raio de 200 m em torno da casa.
-   Casa = location com maior tempo de permanência entre 22:00–08:00 UTC.
-       │
-       ▼
-2. Snap-to-road (OSMnx)
-   Substitui coordenadas GPS exactas pelo nó viário mais próximo.
-   Impede inferir o edifício exacto a partir das coordenadas.
-       │
-       ▼
-3. K-anonimato nas categorias Foursquare
-   Categorias com < 5 ocorrências → "Outro".
-   Impede re-identificação por tipos de local únicos.
-       │
-       ▼
-Dados prontos para visualização pública
-```
-
-**Regra fundamental (CLAUDE.md):** `apply_privacy()` deve ser chamado **antes** de qualquer visualização ou exportação de dados.
+**Nota:** a coluna de geometria das Locations chama-se `center` — usar `locs.set_geometry("center")`.
 
 ---
 
-## 10. Como correr o projecto
+## 10. Arquitectura de privacidade
+
+```
+GPS original → 1. Supressão 200m em torno da casa
+             → 2. Snap-to-road (nó viário mais próximo)
+             → 3. K-anonimato categorias Foursquare (< 5 → "Outro")
+             → Dados prontos para visualização
+```
+
+Casa = location com maior tempo de permanência entre 22:00–08:00 UTC.
+
+---
+
+## 11. Dashboard — estrutura actual
+
+```
+Sidebar: selector de utilizador (Todos / User 1 / User 2 / User 3)
+  │
+  ├── Tab 1: Mapa de Mobilidade
+  │     ├── Folium (4 camadas: GPS 1/10, triplegs, staypoints ∝ dwell, locations)
+  │     └── MovingPandas (atrás de botão, persistido em session_state)
+  │
+  ├── Tab 2: Análise Temporal
+  │     ├── Heatmap hora × dia da semana (Seaborn)
+  │     ├── Modos de transporte (barras horizontais)
+  │     └── Distribuição de actividades por utilizador
+  │
+  └── Tab 3: Resumo Semanal
+        ├── 4 métricas: localização principal, distância, modo dominante, raio de giração
+        └── ML: LOUO (Todos) ou 80/20 (User X) + report detalhado expansível
+```
+
+---
+
+## 12. Como correr o projecto
 
 ### Instalação
 ```bash
@@ -204,35 +286,35 @@ cd onde_passo_meu_tempo/
 pip install -r requirements.txt
 ```
 
-### Pipeline completo + ML
+### Pipeline completo + ML (terminal)
 ```bash
-python - <<'EOF'
+python3 - <<'EOF'
 from src.pipeline import run_pipeline
 from src.ml import extract_features, train_and_evaluate, print_results
 
-artefactos = run_pipeline()          # ~2–5 min (primeiro run)
+artefactos = run_pipeline()
 features, labels, user_ids = extract_features(artefactos['raw_df'])
 results = train_and_evaluate(features, labels, user_ids)
 print_results(results)
 EOF
 ```
 
-### Dashboard Streamlit
+### Dashboard
 ```bash
 streamlit run src/dashboard.py
 ```
 
 ### Verificar imports
 ```bash
-python -c "import src.pipeline; print('pipeline OK')"
-python -c "import src.ml; print('ml OK')"
-python -c "import src.privacy; print('privacy OK')"
-python -c "import src.dashboard; print('dashboard OK')"
+python3 -c "import src.pipeline; print('pipeline OK')"
+python3 -c "import src.ml; print('ml OK')"
+python3 -c "import src.privacy; print('privacy OK')"
+python3 -c "import src.dashboard; print('dashboard OK')"
 ```
 
-### Smoke test rápido
+### Smoke test
 ```bash
-python -c "
+python3 -c "
 from src.pipeline import load_contextlabeler
 df = load_contextlabeler('data')
 print('Shape:', df.shape)
@@ -243,36 +325,35 @@ print('Labels únicas:', sorted(df['label'].unique()))
 
 ---
 
-## 11. Variáveis de ambiente opcionais
+## 13. Variáveis de ambiente
 
 | Variável | Para quê | Obrigatória? |
 |---|---|---|
-| `FSQ_API_KEY` | Enriquecimento semântico das locations via Foursquare Places API | Não — sem ela, `fsq_category = 'Desconhecido'` |
+| `FSQ_API_KEY` | Categorias Foursquare nas locations | Não — sem ela: `fsq_category='Desconhecido'` |
 
 ```bash
-# Exportar antes de correr o pipeline
-export FSQ_API_KEY="sua_chave_aqui"
-python -c "from src.pipeline import run_pipeline; run_pipeline()"
+export FSQ_API_KEY="chave_aqui"
+streamlit run src/dashboard.py
 ```
 
 ---
 
-## 12. Estrutura do projecto
+## 14. Estrutura do projecto
 
 ```
 onde_passo_meu_tempo/
-├── CLAUDE.md          # Especificação do projecto (lida automaticamente pelo Claude Code)
-├── NOTES.md           # Este ficheiro — decisões de implementação e guia de uso
-├── requirements.txt   # Dependências pinadas (Python 3.10+)
+├── CLAUDE.md          # Especificação e convenções (lido pelo Claude Code)
+├── NOTES.md           # Este ficheiro
+├── requirements.txt   # Dependências pinadas
 ├── data/
-│   ├── user_1.csv     # ContextLabeler — 8 456 amostras × 1 333 features
-│   ├── user_2.csv     # ContextLabeler — 17 882 amostras
-│   ├── user_3.csv     # ContextLabeler — 19 343 amostras
-│   └── road_graph.graphml  # Cache OSMnx (criado no primeiro run)
+│   ├── user_1.csv
+│   ├── user_2.csv
+│   ├── user_3.csv
+│   └── road_graph.graphml   # Cache OSMnx (gerado no primeiro run)
 └── src/
-    ├── __init__.py    # Torna src/ um pacote Python importável
-    ├── pipeline.py    # Pipeline principal (load → positionfixes → staypoints → trips)
-    ├── ml.py          # Classificação de actividade + leave-one-user-out
-    ├── privacy.py     # Filtros de privacidade (supressão + snap-to-road + k-anonimato)
-    └── dashboard.py   # Interface Streamlit (3 separadores)
+    ├── __init__.py    # Shim de compatibilidade geopandas/trackintel
+    ├── pipeline.py    # Pipeline principal (8 funções)
+    ├── ml.py          # LOUO + 80/20 por utilizador
+    ├── privacy.py     # 3 camadas de privacidade
+    └── dashboard.py   # Streamlit com sidebar de utilizador
 ```

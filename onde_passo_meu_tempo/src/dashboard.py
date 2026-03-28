@@ -102,9 +102,10 @@ locs = dados["locs"]  # localizações são globais (DBSCAN agg_level='dataset')
 
 # ── Separadores ───────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "🗺️  Mapa de Mobilidade",
     "📊  Análise Temporal",
+    "🔬  Padrões de Comportamento",
     "📋  Resumo Semanal",
 ])
 
@@ -348,7 +349,304 @@ with tab2:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tab 3 — Resumo Semanal
 # ═══════════════════════════════════════════════════════════════════════════════
+# Tab 3 — Padrões de Comportamento
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab3:
+    st.header("Padrões de Comportamento")
+
+    COR_ACT = {
+        "Sleep": "#2c3e50", "Home": "#2980b9", "Working": "#8e44ad",
+        "Free time": "#27ae60", "Launch Break": "#f39c12", "Break": "#e67e22",
+        "Restaurant": "#e74c3c", "Nightlife": "#c0392b",
+        "Physical exercise": "#1abc9c", "Shopping": "#d35400",
+    }
+
+    # Preparar todos os dados com colunas temporais
+    rdf_all = raw_df.copy()
+    rdf_all["dt"]       = pd.to_datetime(rdf_all["time"] // 1000, unit="s", utc=True)
+    rdf_all["hour"]     = rdf_all["dt"].dt.hour
+    rdf_all["dow"]      = rdf_all["dt"].dt.dayofweek
+    rdf_all["date"]     = rdf_all["dt"].dt.date
+    rdf_all["week_lbl"] = rdf_all["dt"].dt.strftime("Semana %Y-W%V")
+    rdf_all["accel"]    = np.sqrt(
+        rdf_all["sensor_linear_acc_x_mean"]**2
+        + rdf_all["sensor_linear_acc_y_mean"]**2
+        + rdf_all["sensor_linear_acc_z_mean"]**2
+    )
+
+    # Filtrar por utilizador (sidebar)
+    rdf_base = rdf_all if sel_uid == 0 else rdf_all[rdf_all["user_id"] == sel_uid]
+
+    # ── Selector de semana ────────────────────────────────────────────────────
+    semanas_disp = sorted(rdf_base["week_lbl"].unique())
+    col_sw1, col_sw2 = st.columns([3, 1])
+    with col_sw1:
+        semana_sel = st.select_slider(
+            "Semana analisada",
+            options=semanas_disp,
+            value=semanas_disp[-1],
+            help="Filtra a timeline e a rotina semanal para a semana seleccionada. "
+                 "Aceleração, WiFi e duração usam sempre todos os dados disponíveis.",
+        )
+    with col_sw2:
+        st.metric("Semanas disponíveis", len(semanas_disp))
+
+    rdf_b = rdf_base[rdf_base["week_lbl"] == semana_sel].copy()
+    # Fallback: se semana sem dados suficientes, usar todos
+    if len(rdf_b) < 10:
+        rdf_b = rdf_base.copy()
+
+    st.divider()
+
+    # ── 1. Timeline de actividades da semana seleccionada ────────────────────
+    st.subheader(f"1. Timeline de Actividades — {semana_sel}")
+
+    dates_sorted  = sorted(rdf_b["date"].unique())
+    tl            = rdf_b.copy()
+    tl["min_of_day"] = tl["hour"] * 60 + tl["dt"].dt.minute
+
+    n_days = len(dates_sorted)
+    fig_tl, ax_tl = plt.subplots(figsize=(14, max(2, n_days * 0.55)))
+    for i, d in enumerate(dates_sorted):
+        day_data = tl[tl["date"] == d]
+        for _, row in day_data.iterrows():
+            cor = COR_ACT.get(row["label"], "#95a5a6")
+            ax_tl.barh(i, 1, left=row["min_of_day"], color=cor, height=0.7)
+    ax_tl.set_yticks(range(n_days))
+    ax_tl.set_yticklabels([
+        pd.Timestamp(d).strftime("%a %d/%m") for d in dates_sorted
+    ])
+    ax_tl.set_xlabel("Minutos desde meia-noite")
+    ax_tl.set_xlim(0, 1440)
+    ax_tl.set_xticks(range(0, 1441, 120))
+    ax_tl.set_xticklabels([f"{h:02d}:00" for h in range(0, 25, 2)], fontsize=8)
+    ax_tl.set_title("Sequência de actividades por dia")
+    # Legenda compacta
+    handles = [plt.Rectangle((0,0),1,1, color=COR_ACT.get(l,"#95a5a6"))
+               for l in rdf_b["label"].unique() if l in COR_ACT]
+    labels_leg = [l for l in rdf_b["label"].unique() if l in COR_ACT]
+    ax_tl.legend(handles, labels_leg, loc="upper right", fontsize=7,
+                 ncol=3, framealpha=0.7)
+    plt.tight_layout()
+    st.pyplot(fig_tl)
+    plt.close(fig_tl)
+
+    st.divider()
+
+    # ── 2. Duração média por actividade (boxplot) — todos os dados do utilizador
+    st.subheader("2. Duração Média por Actividade (todos os dados)")
+
+    rdf_b2 = rdf_base.sort_values(["user_id", "dt"]).copy()
+    rdf_b2["run"] = (
+        (rdf_b2["label"] != rdf_b2["label"].shift()) |
+        (rdf_b2["user_id"] != rdf_b2["user_id"].shift())
+    )
+    rdf_b2["run_id"] = rdf_b2["run"].cumsum()
+    runs = rdf_b2.groupby(["run_id", "label"]).size().reset_index(name="n_min")
+
+    ordem = runs.groupby("label")["n_min"].median().sort_values(ascending=False).index
+    cores_box = [COR_ACT.get(l, "#95a5a6") for l in ordem]
+
+    fig_box, ax_box = plt.subplots(figsize=(12, 4))
+    data_box = [runs[runs["label"] == l]["n_min"].values for l in ordem]
+    bp = ax_box.boxplot(data_box, patch_artist=True, showfliers=False,
+                        medianprops={"color": "white", "linewidth": 2})
+    for patch, cor in zip(bp["boxes"], cores_box):
+        patch.set_facecolor(cor)
+        patch.set_alpha(0.8)
+    ax_box.set_xticklabels(ordem, rotation=30, ha="right", fontsize=9)
+    ax_box.set_ylabel("Duração contínua (minutos)")
+    ax_box.set_title("Duração típica de cada actividade (sem outliers extremos)")
+    plt.tight_layout()
+    st.pyplot(fig_box)
+    plt.close(fig_box)
+
+    st.divider()
+
+    # ── 3. Perfil sensor por actividade — todos os dados do utilizador ────────
+    st.subheader("3. Perfil de Sensores por Actividade (todos os dados)")
+
+    col_s1, col_s2 = st.columns(2)
+
+    with col_s1:
+        # Aceleração média por actividade
+        accel_act = rdf_base.groupby("label")["accel"].mean().sort_values(ascending=True)
+        fig_ac, ax_ac = plt.subplots(figsize=(6, 4))
+        cores_ac = [COR_ACT.get(l, "#95a5a6") for l in accel_act.index]
+        ax_ac.barh(accel_act.index, accel_act.values, color=cores_ac)
+        ax_ac.set_xlabel("Aceleração linear média (m/s²)")
+        ax_ac.set_title("Aceleração por actividade")
+        ax_ac.axvline(accel_act.mean(), color="grey", linestyle="--", alpha=0.6,
+                      label=f"Média geral: {accel_act.mean():.3f}")
+        ax_ac.legend(fontsize=8)
+        plt.tight_layout()
+        st.pyplot(fig_ac)
+        plt.close(fig_ac)
+
+    with col_s2:
+        # WiFi vs Bateria por actividade (radar / grouped bar)
+        wifi_pct  = rdf_base.groupby("label")["wifi_connected"].mean() * 100
+        batt_pct  = rdf_base.groupby("label")["battery_unplugged"].mean() * 100
+        labels_s  = sorted(set(wifi_pct.index) & set(batt_pct.index))
+        x_s       = np.arange(len(labels_s))
+        w_s       = 0.38
+
+        fig_wb, ax_wb = plt.subplots(figsize=(7, 4))
+        ax_wb.bar(x_s - w_s/2, [wifi_pct[l] for l in labels_s],
+                  w_s, label="WiFi ligado (%)", color="#3498db", alpha=0.85)
+        ax_wb.bar(x_s + w_s/2, [batt_pct[l] for l in labels_s],
+                  w_s, label="Sem carregar (%)", color="#e74c3c", alpha=0.85)
+        ax_wb.set_xticks(x_s)
+        ax_wb.set_xticklabels(labels_s, rotation=35, ha="right", fontsize=8)
+        ax_wb.set_ylabel("% amostras")
+        ax_wb.set_title("WiFi e bateria por actividade")
+        ax_wb.legend(fontsize=8)
+        ax_wb.set_ylim(0, 110)
+        plt.tight_layout()
+        st.pyplot(fig_wb)
+        plt.close(fig_wb)
+
+    st.divider()
+
+    # ── 4. Rotina semanal — % tempo por actividade e dia da semana ───────────
+    st.subheader(f"4. Rotina Semanal — {semana_sel}")
+
+    pivot_rot = (
+        rdf_b.groupby(["dow", "label"])
+        .size()
+        .unstack(fill_value=0)
+    )
+    pivot_rot = pivot_rot.div(pivot_rot.sum(axis=1), axis=0) * 100
+    pivot_rot.index = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"][: len(pivot_rot)]
+
+    fig_rot, ax_rot = plt.subplots(figsize=(12, 4))
+    bottom = np.zeros(len(pivot_rot))
+    for col in pivot_rot.columns:
+        vals = pivot_rot[col].values
+        ax_rot.bar(pivot_rot.index, vals, bottom=bottom,
+                   color=COR_ACT.get(col, "#95a5a6"), label=col, alpha=0.9)
+        bottom += vals
+    ax_rot.set_ylabel("% do tempo")
+    ax_rot.set_title("Composição de actividades por dia da semana")
+    ax_rot.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.7)
+    ax_rot.set_ylim(0, 100)
+    plt.tight_layout()
+    st.pyplot(fig_rot)
+    plt.close(fig_rot)
+
+    st.divider()
+
+    # ── 5. Hora típica de ocorrência — todos os dados do utilizador ──────────
+    st.subheader("5. Hora Típica de Ocorrência (todos os dados)")
+
+    hora_med = rdf_base.groupby("label")["hour"].apply(
+        lambda x: np.average(x, weights=np.ones(len(x)))
+    ).sort_values()
+
+    fig_hora, ax_hora = plt.subplots(figsize=(10, 3), subplot_kw={"polar": False})
+    cores_h = [COR_ACT.get(l, "#95a5a6") for l in hora_med.index]
+    bars_h  = ax_hora.barh(hora_med.index, hora_med.values, color=cores_h, alpha=0.85)
+    ax_hora.set_xlabel("Hora média UTC")
+    ax_hora.set_xlim(0, 24)
+    ax_hora.set_xticks(range(0, 25, 2))
+    ax_hora.set_xticklabels([f"{h:02d}h" for h in range(0, 25, 2)])
+    ax_hora.set_title("Hora média de ocorrência de cada actividade")
+    for bar, val in zip(bars_h, hora_med.values):
+        ax_hora.text(val + 0.2, bar.get_y() + bar.get_height()/2,
+                     f"{val:.1f}h", va="center", fontsize=8)
+    plt.tight_layout()
+    st.pyplot(fig_hora)
+    plt.close(fig_hora)
+
+    st.divider()
+
+    # ── 6. Evolução semanal — % de actividades por semana ─────────────────────
+    st.subheader("6. Evolução Semanal das Actividades")
+
+    pivot_evo = (
+        rdf_base.groupby(["week_lbl", "label"])
+        .size()
+        .unstack(fill_value=0)
+    )
+    pivot_evo = pivot_evo.div(pivot_evo.sum(axis=1), axis=0) * 100
+
+    fig_evo, ax_evo = plt.subplots(figsize=(12, 4))
+    bottom_e = np.zeros(len(pivot_evo))
+    for col in pivot_evo.columns:
+        ax_evo.bar(pivot_evo.index, pivot_evo[col].values, bottom=bottom_e,
+                   color=COR_ACT.get(col, "#95a5a6"), label=col, alpha=0.9)
+        bottom_e += pivot_evo[col].values
+
+    # Marcar a semana seleccionada
+    if semana_sel in list(pivot_evo.index):
+        idx_sel = list(pivot_evo.index).index(semana_sel)
+        ax_evo.axvline(idx_sel, color="black", linewidth=2, linestyle="--",
+                       alpha=0.7, label=f"← {semana_sel}")
+
+    ax_evo.set_ylabel("% do tempo")
+    ax_evo.set_title("Composição de actividades por semana")
+    ax_evo.set_xticklabels(pivot_evo.index, rotation=20, ha="right", fontsize=9)
+    ax_evo.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.7)
+    ax_evo.set_ylim(0, 100)
+    plt.tight_layout()
+    st.pyplot(fig_evo)
+    plt.close(fig_evo)
+
+    st.divider()
+
+    # ── 7. Comparação entre utilizadores ──────────────────────────────────────
+    if sel_uid == 0:
+        st.subheader("7. Comparação entre Utilizadores")
+
+        from matplotlib.patches import FancyArrowPatch
+        metricas_users = []
+        for uid in [1, 2, 3]:
+            u = raw_df[raw_df["user_id"] == uid].copy()
+            u["dt"]    = pd.to_datetime(u["time"]//1000, unit="s", utc=True)
+            u["accel"] = np.sqrt(u["sensor_linear_acc_x_mean"]**2
+                                 + u["sensor_linear_acc_y_mean"]**2
+                                 + u["sensor_linear_acc_z_mean"]**2)
+            n_locs     = dados["spts"][dados["spts"]["user_id"]==uid]["location_id"].nunique()
+            pct_sleep  = (u["label"]=="Sleep").mean()*100
+            pct_work   = (u["label"]=="Working").mean()*100
+            pct_home   = (u["label"]=="Home").mean()*100
+            accel_mean = u["accel"].mean()
+            wifi_pct   = u["wifi_connected"].mean()*100
+            metricas_users.append({
+                "User": f"User {uid}",
+                "% Sleep": round(pct_sleep,1),
+                "% Working": round(pct_work,1),
+                "% Home": round(pct_home,1),
+                "Aceleração\nmédia": round(accel_mean,3),
+                "% WiFi\nligado": round(wifi_pct,1),
+                "Locais\nvisitados": n_locs,
+            })
+
+        df_comp = pd.DataFrame(metricas_users).set_index("User")
+        st.dataframe(df_comp, use_container_width=True)
+
+        # Barras agrupadas por métrica
+        metricas_plot = ["% Sleep", "% Working", "% Home", "% WiFi\nligado"]
+        fig_comp, axes_comp = plt.subplots(1, len(metricas_plot), figsize=(14, 4))
+        for ax_c, met in zip(axes_comp, metricas_plot):
+            vals = [df_comp.loc[f"User {u}", met] for u in [1,2,3]]
+            bars = ax_c.bar([1,2,3], vals,
+                            color=[COR_USER[1], COR_USER[2], COR_USER[3]], alpha=0.85)
+            ax_c.set_xticks([1,2,3])
+            ax_c.set_xticklabels(["User 1","User 2","User 3"], fontsize=8)
+            ax_c.set_title(met, fontsize=9)
+            ax_c.set_ylabel("%")
+            for bar, v in zip(bars, vals):
+                ax_c.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.5,
+                          f"{v:.1f}", ha="center", fontsize=8)
+        plt.suptitle("Comparação de perfis entre utilizadores", y=1.02)
+        plt.tight_layout()
+        st.pyplot(fig_comp)
+        plt.close(fig_comp)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab4:
     st.header("Resumo Semanal")
 
     # ── Métricas ──────────────────────────────────────────────────────────────

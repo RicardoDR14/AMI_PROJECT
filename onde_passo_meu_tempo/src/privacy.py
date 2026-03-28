@@ -59,7 +59,7 @@ def detect_home(spts: gpd.GeoDataFrame) -> Point:
 
     if night_spts.empty:
         # Fallback: centróide de todos os staypoints (caso não haja dados nocturnos)
-        return spts.geometry.unary_union.centroid
+        return spts.geometry.union_all().centroid
 
     night_spts = night_spts.copy()
     night_spts["dwell_s"] = (
@@ -70,7 +70,7 @@ def detect_home(spts: gpd.GeoDataFrame) -> Point:
     home_loc_id  = dwell_by_loc.idxmax()
 
     home_spts = night_spts[night_spts["location_id"] == home_loc_id]
-    return home_spts.geometry.unary_union.centroid
+    return home_spts.geometry.union_all().centroid
 
 
 def apply_privacy(
@@ -174,11 +174,14 @@ def _snap_to_road(pfs: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         lats = pfs.geometry.y
         # osmnx 1.9.x: graph_from_bbox(north, south, east, west, network_type)
         print("    A descarregar rede viária do OpenStreetMap (pode demorar minutos)...")
+        # osmnx 2.x: graph_from_bbox(bbox=(west, south, east, north), ...)
         G = ox.graph_from_bbox(
-            north=float(lats.max()),
-            south=float(lats.min()),
-            east=float(lons.max()),
-            west=float(lons.min()),
+            bbox=(
+                float(lons.min()),  # west
+                float(lats.min()),  # south
+                float(lons.max()),  # east
+                float(lats.max()),  # north
+            ),
             network_type=OSM_NETWORK_TYPE,
         )
         OSM_GRAPH_CACHE.parent.mkdir(parents=True, exist_ok=True)

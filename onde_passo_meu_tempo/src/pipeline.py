@@ -231,8 +231,12 @@ def build_trajectories(pfs: gpd.GeoDataFrame) -> mpd.TrajectoryCollection:
         Colecção de trajectórias por utilizador.
         Usar tc.explore() para visualização interactiva via HoloViz.
     """
+    # Converter para GeoDataFrame base antes de passar ao MovingPandas.
+    # O PositionfixesDataFrame do Trackintel usa _constructor_from_mgr internamente,
+    # o que conflitua com o groupby do pandas no MovingPandas (geopandas 0.14.x).
+    gdf = gpd.GeoDataFrame(pfs, geometry=pfs.geometry.name, crs=pfs.crs)
     tc = mpd.TrajectoryCollection(
-        pfs,
+        gdf,
         traj_id_col="user_id",
         t="tracked_at",
         min_length=10,  # metros — filtra trajectórias triviais (p. ex. GPS drift estacionário)
@@ -276,6 +280,9 @@ def segment_trajectories(
         method="between_staypoints",
         gap_threshold=GAP_THRESHOLD_MIN,
     )
+    # generate_trips requer a coluna 'is_activity'; todos os staypoints detectados são actividades
+    spts = spts.copy()
+    spts["is_activity"] = True
     print(f"  {len(spts):,} staypoints | {len(tpls):,} triplegs")
     return pfs_out, spts, tpls
 
@@ -330,11 +337,14 @@ def merge_and_detect_locations(
         print(f"  Davies-Bouldin Index (DBSCAN): {dbi:.4f}")
 
     # Agregar staypoints consecutivos na mesma localização
-    spts_merged = ti.preprocessing.staypoints.merge_staypoints(
+    spts_raw = ti.preprocessing.staypoints.merge_staypoints(
         spts_locs,
         triplegs=tpls,
         max_time_gap="10min",
+        agg={"geometry": "first", "is_activity": "any"},  # preservar geometria e flag de actividade
     )
+    # merge_staypoints devolve a geometria como Series plana — reconverter para GeoDataFrame
+    spts_merged = gpd.GeoDataFrame(spts_raw, geometry="geometry", crs=spts_locs.crs)
 
     # A geometria das Locations está na coluna 'center' — activá-la explicitamente
     locs = locs.set_geometry("center")
@@ -419,7 +429,7 @@ def generate_trips_and_modes(
     tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]
         (staypoints_actualizados, triplegs_com_transport_mode, trips)
     """
-    spts_out, tpls_out, trips = ti.preprocessing.trips.generate_trips(
+    spts_out, tpls_out, trips = ti.preprocessing.generate_trips(
         staypoints=spts,
         triplegs=tpls,
         gap_threshold=GAP_THRESHOLD_MIN,

@@ -8,9 +8,12 @@
 # incompatível com o restante stack.
 # Substitutos: trackintel.analysis.metrics (radius_gyration, location_entropy).
 
-# ── Geoespacial (ordem importa para o resolver do pip) ────────────────────────
-osmnx==1.9.4
-geopandas==0.14.4    # 1.x incompatível com osmnx 1.9.4 (requer geopandas<0.15)
+# ── Geoespacial ───────────────────────────────────────────────────────────────
+# Sistema tem Python 3.12 → osmnx 2.x suportado (requer Python ≥ 3.11).
+# trackintel 1.4.2 usa API interna do geopandas 1.x (_geodataframe_constructor_with_fallback)
+# → geopandas deve ser ≥ 1.0.
+geopandas==1.0.1
+osmnx==2.0.0
 shapely==2.0.6
 pyproj==3.6.1
 fiona==1.10.1

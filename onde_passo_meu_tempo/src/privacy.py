@@ -135,6 +135,9 @@ def apply_privacy(
         locs_anon = _apply_k_anonymity(locs, k=k)
         # Mapear categorias anonimizadas de volta aos staypoints via location_id
         cat_map = locs_anon["fsq_category"]
+        # Garantir índice único (location_id pode ter duplicados após o set_geometry)
+        if not cat_map.index.is_unique:
+            cat_map = cat_map[~cat_map.index.duplicated(keep="first")]
         spts_filt = spts_filt.copy()
         spts_filt["fsq_category"] = spts_filt["location_id"].map(cat_map)
         n_other = (spts_filt["fsq_category"] == RARE_CATEGORY_LABEL).sum()

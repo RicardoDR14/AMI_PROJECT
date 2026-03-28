@@ -56,7 +56,6 @@ st.caption(
 def carregar_dados():
     from src.pipeline import run_pipeline
     from src.privacy import apply_privacy
-    from src.ml import extract_features, train_and_evaluate
 
     artefactos = run_pipeline()
     pfs_priv, spts_priv = apply_privacy(
@@ -66,23 +65,24 @@ def carregar_dados():
     )
     artefactos["pfs_priv"]  = pfs_priv
     artefactos["spts_priv"] = spts_priv
-
-    # ML
-    features, labels, user_ids = extract_features(artefactos["raw_df"])
-    artefactos["ml_results"] = train_and_evaluate(features, labels, user_ids)
-
     return artefactos
 
 
-dados = carregar_dados()
-tpls  = dados["tpls"]
-locs  = dados["locs"]
-spts  = dados["spts_priv"]
-pfs   = dados["pfs_priv"]
-raw_df = dados["raw_df"]
-tc    = dados["tc"]
-trips = dados["trips"]
-ml_results = dados["ml_results"]
+@st.cache_resource(show_spinner="A treinar modelos ML… (~30 s)")
+def carregar_ml(raw_df):
+    from src.ml import extract_features, train_and_evaluate
+    features, labels, user_ids = extract_features(raw_df)
+    return train_and_evaluate(features, labels, user_ids)
+
+
+dados     = carregar_dados()
+tpls      = dados["tpls"]
+locs      = dados["locs"]
+spts      = dados["spts_priv"]
+pfs       = dados["pfs_priv"]
+raw_df    = dados["raw_df"]
+tc        = dados["tc"]
+trips     = dados["trips"]
 
 # ── Separadores ───────────────────────────────────────────────────────────────
 
@@ -101,19 +101,39 @@ with tab1:
     # ── Mapa Folium ──────────────────────────────────────────────────────────
     st.subheader("Trajectórias e Localizações")
 
-    # Centro do mapa = centróide de todos os positionfixes
-    _pfs_geom = pfs[pfs.geometry.name] if hasattr(pfs, "geometry") else pfs["geometry"]
-    centro_lat = float(_pfs_geom.y.mean())
-    centro_lon = float(_pfs_geom.x.mean())
-    m = folium.Map(location=[centro_lat, centro_lon], zoom_start=13, tiles="CartoDB positron")
-
     # Cores por utilizador
     COR_USER = {1: "#e74c3c", 2: "#2980b9", 3: "#27ae60"}
 
-    # Triplegs — linha por segmento
+    # Centro do mapa = centróide dos positionfixes privados
+    _pfs_wgs = pfs.to_crs("EPSG:4326") if pfs.crs and pfs.crs.to_epsg() != 4326 else pfs
+    _gc = _pfs_wgs.geometry.name
+    centro_lat = float(_pfs_wgs[_gc].y.mean())
+    centro_lon = float(_pfs_wgs[_gc].x.mean())
+    m = folium.Map(location=[centro_lat, centro_lon], zoom_start=13, tiles="CartoDB positron")
+
+    # ── Camada 1: trajectória GPS (subamostrada a cada 10 pontos) ─────────────
+    # 45k pontos → ~4.5k; mantém a forma da trajectória sem travar o browser
+    fg_pfs = folium.FeatureGroup(name="Trajectória GPS", show=True)
+    if "user_id" in _pfs_wgs.columns and "tracked_at" in _pfs_wgs.columns:
+        for uid, grp in _pfs_wgs.sort_values("tracked_at").groupby("user_id"):
+            grp_sub = grp.iloc[::10]  # 1 em cada 10 pontos
+            coords = list(zip(grp_sub[_gc].y, grp_sub[_gc].x))
+            if len(coords) < 2:
+                continue
+            folium.PolyLine(
+                coords,
+                color=COR_USER.get(int(uid), "#7f8c8d"),
+                weight=2,
+                opacity=0.45,
+                tooltip=f"User {uid} — trajectória GPS",
+            ).add_to(fg_pfs)
+    fg_pfs.add_to(m)
+
+    # ── Camada 2: triplegs (segmentos de movimento) ───────────────────────────
+    fg_tpls = folium.FeatureGroup(name="Triplegs (movimento)", show=True)
     if not tpls.empty:
         tpls_wgs = tpls.to_crs("EPSG:4326") if tpls.crs and tpls.crs.to_epsg() != 4326 else tpls
-        geom_col = tpls_wgs.geometry.name  # nome real da coluna de geometria
+        geom_col = tpls_wgs.geometry.name
         for _, row in tpls_wgs.iterrows():
             geom = row[geom_col]
             if geom is None or geom.is_empty:
@@ -124,61 +144,97 @@ with tab1:
                 continue
             modo = row.get("transport_mode", "—")
             uid  = int(row.get("user_id", 1))
-            cor  = COR_USER.get(uid, "#7f8c8d")
             folium.PolyLine(
                 coords,
-                color=cor,
-                weight=3,
-                opacity=0.7,
+                color=COR_USER.get(uid, "#7f8c8d"),
+                weight=5,
+                opacity=0.9,
                 tooltip=f"User {uid} · {modo}",
-            ).add_to(m)
+            ).add_to(fg_tpls)
+    fg_tpls.add_to(m)
 
-    # Localizações — marcadores circulares
+    # ── Camada 3: staypoints agrupados por localização (≤ 93 marcadores) ────────
+    # Em vez de 1734 círculos individuais, agregar por location_id → muito mais leve
+    fg_spts = folium.FeatureGroup(name="Staypoints", show=True)
+    if not spts.empty and hasattr(spts, "geometry") and "location_id" in spts.columns:
+        spts_wgs = spts.to_crs("EPSG:4326") if spts.crs and spts.crs.to_epsg() != 4326 else spts
+        _sg = spts_wgs.geometry.name
+        spts_wgs2 = spts_wgs.copy()
+        spts_wgs2["dwell_min"] = (
+            (spts_wgs2["finished_at"] - spts_wgs2["started_at"]).dt.total_seconds() / 60
+        ).clip(lower=1)
+        # Agregar: centróide e dwell total por localização
+        agg = spts_wgs2[spts_wgs2["location_id"].notna()].groupby("location_id").agg(
+            dwell_total=("dwell_min", "sum"),
+            lat=(_sg, lambda g: g.iloc[0].y),
+            lon=(_sg, lambda g: g.iloc[0].x),
+        )
+        max_dwell = agg["dwell_total"].max()
+        for _, row in agg.iterrows():
+            radius = 5 + 18 * (row["dwell_total"] / max_dwell)
+            folium.CircleMarker(
+                location=[row["lat"], row["lon"]],
+                radius=radius,
+                color="#8e44ad",
+                fill=True,
+                fill_color="#8e44ad",
+                fill_opacity=0.5,
+                tooltip=f"Loc {_} · {row['dwell_total']:.0f} min total",
+            ).add_to(fg_spts)
+    fg_spts.add_to(m)
+
+    # ── Camada 4: localizações (clusters DBSCAN) ──────────────────────────────
+    fg_locs = folium.FeatureGroup(name="Localizações (DBSCAN)", show=True)
     locs_plot = locs.set_geometry("center") if "center" in locs.columns else locs
     if locs_plot.crs and locs_plot.crs.to_epsg() != 4326:
         locs_plot = locs_plot.to_crs("EPSG:4326")
     geom_col_locs = locs_plot.geometry.name
-
     for loc_id, row in locs_plot.iterrows():
-        cat = row.get("fsq_category", "Desconhecido")
+        cat  = row.get("fsq_category", "Desconhecido")
         geom = row[geom_col_locs]
-        lat = geom.y
-        lon = geom.x
         folium.CircleMarker(
-            location=[lat, lon],
-            radius=7,
+            location=[geom.y, geom.x],
+            radius=10,
             color="#f39c12",
             fill=True,
             fill_color="#f39c12",
             fill_opacity=0.85,
-            tooltip=f"Local {loc_id} · {cat}",
-        ).add_to(m)
+            tooltip=f"Loc {loc_id} · {cat}",
+        ).add_to(fg_locs)
+    fg_locs.add_to(m)
 
-    # Legenda manual
+    folium.LayerControl(collapsed=False).add_to(m)
+
+    # Legenda
     legenda = """
     <div style="position:fixed;bottom:30px;left:30px;z-index:1000;background:white;
                 padding:10px 14px;border-radius:8px;box-shadow:2px 2px 6px rgba(0,0,0,.3);
-                font-size:13px;line-height:1.8">
+                font-size:13px;line-height:1.9">
       <b>Utilizadores</b><br>
       <span style="color:#e74c3c">&#9632;</span> User 1<br>
       <span style="color:#2980b9">&#9632;</span> User 2<br>
       <span style="color:#27ae60">&#9632;</span> User 3<br>
-      <span style="color:#f39c12">&#9679;</span> Localização
+      <hr style="margin:4px 0">
+      <span style="color:#8e44ad">&#9679;</span> Staypoints (∝ dwell)<br>
+      <span style="color:#f39c12">&#9679;</span> Localização (DBSCAN)
     </div>
     """
     m.get_root().html.add_child(folium.Element(legenda))
 
-    st_folium(m, use_container_width=True, height=500)
+    st_folium(m, use_container_width=True, height=550)
 
     st.divider()
 
     # ── MovingPandas HoloViz ─────────────────────────────────────────────────
     st.subheader("Trajectórias Animadas (MovingPandas)")
-    try:
-        html_str = tc.explore().to_html()
-        st.components.v1.html(html_str, height=500, scrolling=False)
-    except Exception as e:
-        st.warning(f"MovingPandas explore() não disponível: {e}")
+    st.caption("Geração do mapa interactivo pode demorar ~30 s.")
+    if st.button("▶ Gerar mapa animado"):
+        with st.spinner("A gerar mapa MovingPandas…"):
+            try:
+                html_str = tc.explore().to_html()
+                st.components.v1.html(html_str, height=500, scrolling=False)
+            except Exception as e:
+                st.warning(f"MovingPandas explore() não disponível: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -371,6 +427,9 @@ with tab3:
     # ── Resultados ML ─────────────────────────────────────────────────────────
     st.subheader("Classificação de Actividade (Leave-One-User-Out)")
 
+    # ML é carregado apenas quando o tab3 é aberto (lazy)
+    ml_results = carregar_ml(raw_df)
+
     # Tabela de médias por modelo
     rows = []
     modelos = {}
@@ -392,7 +451,7 @@ with tab3:
     # Gráfico de barras acurácia por fold
     fig_ml, axes_ml = plt.subplots(1, 2, figsize=(12, 4))
 
-    fold_labels = [f"User {f['test_user']} (teste)" for f in ml_results]
+    fold_labels = [f"User {f['test_user']} (teste)" for f in ml_results]  # noqa: F821
     x = np.arange(len(fold_labels))
     width = 0.25
 
